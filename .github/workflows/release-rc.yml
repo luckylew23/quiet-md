@@ -1,0 +1,69 @@
+name: Release rc (fork)
+
+# Fork-only: builds the Apple Silicon package the way CI does (ad-hoc signed,
+# no notarization — see scripts/release.sh with SIGNING_IDENTITY=-) and
+# publishes it as a pre-release on this fork. Push a `v*-rc.*` tag to run it.
+# Upstream releases stay hand-made; this file is not for them.
+
+on:
+  push:
+    tags:
+      - 'v*-rc.*'
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64:
+    name: package + publish
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # rust-toolchain.toml pins the channel; rustup show installs it.
+      - name: Install toolchain
+        run: |
+          rustup show
+          cargo --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          env-vars: MACOSX_DEPLOYMENT_TARGET
+
+      - name: Package Apple Silicon
+        env:
+          SIGNING_IDENTITY: '-'
+        run: scripts/release.sh
+
+      # The package as shipped, end to end (src/selftest.rs) on a temporary library.
+      - name: Self-test the package
+        run: scripts/self-test-macos.sh dist-release.*/quiet-md-*-macos-arm64-unsigned.zip "self-test/macos-arm64"
+
+      - name: Publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes=$(mktemp)
+          cat > "$notes" <<'EOF'
+          A fork build for trying this branch, not an upstream release.
+
+          It is **ad-hoc signed, not notarized** (no Apple Developer account here), so macOS
+          refuses the first launch: right-click `Quiet.md.app` → Open, or run
+          `xattr -dr com.apple.quarantine /Applications/Quiet.md.app` once.
+
+          What this branch carries over upstream `main`:
+
+          - a remote picture is fetched with a browser's User-Agent, so hosts that answer
+            `curl/8.x` with 403 (知乎's `zhimg.com`) now load — upstream PR s1dashu/quiet-md#461.
+
+          The `.dmg` is the download; the `.zip` is the same bundle.
+          EOF
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "quiet.md $TAG (fork rc)" --notes-file "$notes" \
+            dist-release.*/quiet-md-*-macos-arm64-unsigned.dmg \
+            dist-release.*/quiet-md-*-macos-arm64-unsigned.zip \
+            dist-release.*/quiet-md-*-macos-arm64-unsigned.zip.sha256
