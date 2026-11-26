@@ -60,10 +60,71 @@ jobs:
           - a remote picture is fetched with a browser's User-Agent, so hosts that answer
             `curl/8.x` with 403 (知乎's `zhimg.com`) now load — upstream PR s1dashu/quiet-md#461.
 
-          The `.dmg` is the download; the `.zip` is the same bundle.
+          The `.dmg` is the download on macOS; the `.zip` is the same bundle. On Windows the
+          `-windows-x64-setup.exe` is an **unsigned** Inno Setup installer, so SmartScreen says
+          "Windows protected your PC": More info → Run anyway.
           EOF
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
             --title "quiet.md $TAG (fork rc)" --notes-file "$notes" \
             dist-release.*/quiet-md-*-macos-arm64-unsigned.dmg \
             dist-release.*/quiet-md-*-macos-arm64-unsigned.zip \
             dist-release.*/quiet-md-*-macos-arm64-unsigned.zip.sha256
+
+  windows-x64:
+    name: windows x64 installer
+    # Runs after the macOS job publishes, then adds the installer to the same
+    # pre-release (gh release upload): no second release, no artifact passing.
+    needs: macos-arm64
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # package-windows.ps1 needs the VS C++ runtime (VCToolsRedistDir) and
+      # Inno Setup 6, which windows-2022 ships; unsigned (no certificate here).
+      - name: Build and package with the Windows SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools were not found' }
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          & scripts/package-windows.ps1 -Iscc "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+
+      # The installer as shipped, end to end (src/selftest.rs).
+      - name: Self-test the installer
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe | Select-Object -First 1
+          & scripts/self-test-windows.ps1 -Installer $setup.FullName -Output self-test/windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Release self-test failed' }
+
+      - name: Upload the self-test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: self-test-windows
+          path: |
+            self-test/
+            !self-test/**/文档库 Library/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Add the installer to the pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release upload $env:TAG --repo $env:GITHUB_REPOSITORY --clobber `
+            (Get-ChildItem dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe).FullName `
+            (Get-ChildItem dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe.sha256).FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading the installer failed' }
